@@ -1,10 +1,12 @@
 {
-    "discord_client_id": "1387072571542999091",
-    "storyteller_url": "http://localhost:8001 OR https://storyteller.example.com", 
-    "storyteller_token": "YOUR_STORYTELLER_API_TOKEN",
-    "show_progress": true,
+    "komga_url": "http://localhost:25600 OR https://komga.example.com",
+    "komga_api_key": "YOUR_KOMGA_API_KEY",
+    "discord_client_id": "YOUR_DISCORD_CLIENT_ID",
 
-    //This option will grab the covers from your Storyteller Server and upload them to imgur
-    "use_storyteller_cover": true,
-    "imgur_client_id": "GET FROM https://imgur.com/account/settings/apps"
+    // Optional: Use Imgur to host cover art for Discord (recommended for public Discord RPC)
+    "use_imgur_cover": true,
+    "imgur_client_id": "YOUR_IMGUR_CLIENT_ID",
+
+    // Optional: Exclude books from these libraries from Discord RPC
+    "exclude_libraries": ["Private", "Work"]
 }

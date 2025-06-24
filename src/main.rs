@@ -16,43 +16,32 @@ const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 #[derive(Debug, Deserialize)]
 struct Config {
     discord_client_id: String,
-    storyteller_url: String,
-    storyteller_username: String,
-    storyteller_password: String,
+    komga_url: String,
+    komga_api_key: String,
     show_progress: Option<bool>,
-    use_storyteller_cover: Option<bool>,
+    use_imgur_cover: Option<bool>,
     imgur_client_id: Option<String>,
-    exclude_keywords: Option<Vec<String>>,
+    exclude_libraries: Option<Vec<String>>,
 }
 
-#[derive(Debug)]
-struct Book {
-    id: i64,
+#[derive(Debug, Deserialize)]
+struct Library {
+    id: String,
     name: String,
-    authors: Vec<String>,
+    #[serde(rename = "type")]
+    lib_type: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
-struct ReleaseInfo {
-    tag_name: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct BooksResponse {
-    #[serde(flatten)]
-    books: Vec<BookDetail>,
-}
-
-#[derive(Debug, Deserialize)]
-struct BookDetail {
-    id: i64,
-    title: String,
-    authors: Vec<BookAuthor>,
+#[derive(Debug, Deserialize, Clone)]
+struct Series {
+    id: String,
+    title: Option<String>,
+    authors: Option<Vec<SeriesAuthor>>,
     #[serde(rename = "processingStatus")]
     processing_status: Option<ProcessingStatusObject>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 struct ProcessingStatusObject {
     #[serde(rename = "currentTask")]
     current_task: String,
@@ -60,15 +49,15 @@ struct ProcessingStatusObject {
     status: ProcessingStatus,
 }
 
-#[derive(Debug, Deserialize)]
-struct BookAuthor {
+#[derive(Debug, Deserialize, Clone)]
+struct SeriesAuthor {
     name: String,
     #[serde(rename = "fileAs")]
     file_as: Option<String>,
     role: Option<String>,
 }
 
-#[derive(Debug, Deserialize, PartialEq)]
+#[derive(Debug, Deserialize, PartialEq, Clone)]
 #[serde(rename_all = "snake_case")]
 enum ProcessingStatus {
     Uploaded,
@@ -116,9 +105,29 @@ struct ImgurData {
 }
 
 #[derive(Debug, Deserialize)]
-struct BookPosition {
+struct SeriesPosition {
     timestamp: u64,
     locator: serde_json::Value, // We don't need to parse the full locator structure
+}
+
+#[derive(Debug, Deserialize)]
+struct SeriesPage {
+    content: Vec<Series>,
+    // You can add more fields if needed (e.g., totalElements, etc.)
+}
+
+#[derive(Debug, Deserialize, Clone)]
+struct Book {
+    id: String,
+    title: Option<String>,
+    number: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct BookReadProgress {
+    page: Option<u32>,
+    completed: bool,
+    updated_at: Option<String>, // ISO8601 timestamp
 }
 
 #[tokio::main]
@@ -143,40 +152,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let config = load_config(&config_file)?;
     let mut discord = DiscordIpcClient::new(&config.discord_client_id);    discord.connect()?;
-    info!("Storyteller Discord RPC Connected!");    let mut playback_state = PlaybackState {
+    info!("Komga Discord RPC Connected!");    let mut playback_state = PlaybackState {
         last_api_time: SystemTime::now(),
         is_reading: false,
     };
-    let mut current_book: Option<Book> = None;
+    let mut current_series: Option<Series> = None;
     let mut timing_info = TimingInfo {
         last_api_time: None,
         last_position: None,
     };    let mut imgur_cache: HashMap<String, String> = HashMap::new();
-    let mut access_token: Option<String> = None;
 
     loop {
-        // Authenticate if we don't have a token
-        if access_token.is_none() {
-            match authenticate_storyteller(&client, &config).await {
-                Ok(token) => {
-                    access_token = Some(token);
-                    info!("Successfully authenticated with Storyteller");
-                }
-                Err(e) => {
-                    error!("Failed to authenticate with Storyteller: {}", e);
-                    time::sleep(Duration::from_secs(30)).await;
-                    continue;
-                }
-            }
-        }
-
         if let Err(e) = set_activity(
             &client,
             &config,
-            access_token.as_ref().unwrap(),
             &mut discord,
             &mut playback_state,
-            &mut current_book,
+            &mut current_series,
             &mut timing_info,
             &mut imgur_cache,
         )        .await
@@ -214,7 +206,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             if is_auth_error {
                 warn!("Authentication expired, re-authenticating...");
-                access_token = None;
+                // access_token = None;
                 continue;
             }
 
@@ -263,133 +255,156 @@ fn load_config(config_file: &str) -> Result<Config, Box<dyn std::error::Error>> 
 async fn set_activity(
     client: &Client,
     config: &Config,
-    access_token: &str,
     discord: &mut DiscordIpcClient,
     playback_state: &mut PlaybackState,
-    current_book: &mut Option<Book>,
+    current_series: &mut Option<Series>,
     timing_info: &mut TimingInfo,
     imgur_cache: &mut HashMap<String, String>,
-) -> Result<(), Box<dyn std::error::Error>> {    // Get all books from Storyteller - try /api/books first, then /books
-    let books_endpoints = [
-        format!("{}/api/books", config.storyteller_url),
-        format!("{}/books", config.storyteller_url),
-    ];
-    
-    let mut resp: Option<Vec<BookDetail>> = None;
-    for books_url in &books_endpoints {
-        let response = client
-            .get(books_url)
-            .bearer_auth(access_token)
-            .send()
-            .await?;        if response.status().is_success() {
-            resp = Some(response.json().await?);
-            break;
-        }
-        
-        // If we get a 404, try the next endpoint
-        if response.status() == reqwest::StatusCode::NOT_FOUND {
-            continue;
-        }
-        
-        // For other errors (like auth errors), return them immediately
-        return Err(format!("Failed to fetch books with status: {}", response.status()).into());
+) -> Result<(), Box<dyn std::error::Error>> {    // Get all libraries from Komga
+    let libraries_url = format!("{}/api/v1/libraries", config.komga_url);
+    let response = client
+        .get(&libraries_url)
+        .header("X-API-Key", &config.komga_api_key)
+        .send()
+        .await?;
+
+    if !response.status().is_success() {
+        return Err(format!("Failed to fetch libraries with status: {}", response.status()).into());
     }
-    
-    let resp = resp.ok_or("No working books endpoint found")?;    if resp.is_empty() {
-        info!("No books found in Storyteller library");
+
+    let libraries: Vec<Library> = response.json().await?;
+
+    if libraries.is_empty() {
+        info!("No libraries found in Komga");
         discord.clear_activity()?;
         return Ok(());
     }
 
-    // Find the book with the most recent reading activity by checking position timestamps
-    let mut most_recent_book: Option<(&BookDetail, u64)> = None;
-    
-    for book in &resp {
-        // Only check completed/synced books
-        if let Some(ref status_obj) = book.processing_status {
-            if status_obj.status != ProcessingStatus::Completed {
+    // For now, just pick the first library - in the future, we might want to allow
+    // configuration of which library to use, or cycle through multiple libraries
+    let library = &libraries[0];
+
+    // Get all series in the library (use correct Komga endpoint)
+    let series_url = format!("{}/api/v1/series?library_id={}", config.komga_url, library.id);
+    let response = client
+        .get(&series_url)
+        .header("X-API-Key", &config.komga_api_key)
+        .send()
+        .await?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let text = response.text().await.unwrap_or_default();
+        error!("Failed to fetch series with status: {}. Body: {}", status, text);
+        return Err(format!("Failed to fetch series with status: {}", status).into());
+    }
+
+    let series_page: SeriesPage = response.json().await?;
+    let series_list = series_page.content;
+
+    if series_list.is_empty() {
+        info!("No series found in Komga library");
+        discord.clear_activity()?;
+        return Ok(());
+    }
+
+    // Find the book with the most recent reading activity (within 5 minutes)
+    let mut most_recent: Option<(Series, Book, u64, Option<u32>)> = None;
+    for series in &series_list {
+        // Only skip series if they are in a failed state
+        if let Some(ref status_obj) = series.processing_status {
+            if status_obj.status == ProcessingStatus::Failed {
                 continue;
             }
-        } else {
-            continue;
         }
+        // Fetch books for this series
+        let books_url = format!("{}/api/v1/series/{}/books", config.komga_url, series.id);
         
-        // Try to get the position for this book to check recent activity
-        let position_endpoints = [
-            format!("{}/api/books/{}/positions", config.storyteller_url, book.id),
-            format!("{}/books/{}/positions", config.storyteller_url, book.id),
-        ];
-        
-        for position_url in &position_endpoints {
-            match client
-                .get(position_url)
-                .bearer_auth(access_token)
-                .send()
-                .await
-            {
-                Ok(response) => {
-                    if response.status().is_success() {
-                        if let Ok(position) = response.json::<BookPosition>().await {
-                            // Check if this book has more recent activity
-                            if most_recent_book.as_ref().map_or(true, |(_, timestamp)| position.timestamp > *timestamp) {
-                                most_recent_book = Some((book, position.timestamp));
+        match client
+            .get(&books_url)
+            .header("X-API-Key", &config.komga_api_key)
+            .send()
+            .await
+        {
+            Ok(response) => {
+                if response.status().is_success() {
+                    // Get the last book in the series (assuming the last book is the most recent)
+                    if let Ok(books) = response.json::<Vec<Book>>().await {
+                        if let Some(last_book) = books.last() {
+                            // Now get the read progress for this book
+                            let progress_url = format!("{}/api/v1/books/{}/progress", config.komga_url, last_book.id);
+                            
+                            match client
+                                .get(&progress_url)
+                                .header("X-API-Key", &config.komga_api_key)
+                                .send()
+                                .await
+                            {
+                                Ok(progress_response) => {
+                                    if progress_response.status().is_success() {
+                                        if let Ok(progress) = progress_response.json::<BookReadProgress>().await {
+                                            // Check if this is the most recent series+book combo
+                                            if most_recent.as_ref().map_or(true, |(_, _, timestamp, _)| progress.updated_at.as_ref().map_or(0, |t| t.parse::<u64>().unwrap_or(0)) > *timestamp) {
+                                                most_recent = Some((series.clone(), last_book.clone(), progress.updated_at.as_ref().map_or(0, |t| t.parse::<u64>().unwrap_or(0)), Some(progress.page.unwrap_or(0))));
+                                            }
+                                        }
+                                    }
+                                }
+                                Err(_) => {
+                                    // Ignore errors when fetching progress
+                                }
                             }
-                            break; // Successfully got position, move to next book
                         }
-                    } else if response.status() == reqwest::StatusCode::NOT_FOUND {
-                        // No position found for this book, but that's ok - try next endpoint
-                        continue;
                     }
                 }
-                Err(_) => {
-                    // Error getting position, try next endpoint
-                    continue;
-                }
+            }
+            Err(_) => {
+                // Ignore errors when fetching books
             }
         }
     }    // Check if we have recent activity, or clear Discord status
-    let book = if let Some((book, timestamp)) = most_recent_book {
+    let series = if let Some((series, book, timestamp, page)) = most_recent {
         // Check if the activity is recent enough
         let now = SystemTime::now();
         if should_show_as_reading_with_timestamp(&now, timestamp) {
-            info!("Found most recently active book: {} (last activity: {})", book.title, timestamp);
-            book
+            info!("Found most recently active series: {} (last activity: {})", series.title.as_deref().unwrap_or("Untitled"), timestamp);
+            series
         } else {
-            info!("Most recent book activity is too old (timestamp: {}), clearing Discord status", timestamp);
+            info!("Most recent series activity is too old (timestamp: {}), clearing Discord status", timestamp);
             discord.clear_activity()?;
             return Ok(());
         }
     } else {
-        // No position data found for any book, clear Discord status
-        info!("No position data found for any completed books, clearing Discord status");
+        // No position data found for any series, clear Discord status
+        info!("No position data found for any completed series, clearing Discord status");
         discord.clear_activity()?;
         return Ok(());
     };
 
-    // Check if this book should be excluded based on keywords
-    if let Some(ref exclude_keywords) = config.exclude_keywords {
-        for keyword in exclude_keywords {
-            if book.title.to_lowercase().contains(&keyword.to_lowercase()) {
-                info!("Book '{}' contains excluded keyword '{}', skipping Discord RPC", book.title, keyword);
-                discord.clear_activity()?;
-                return Ok(());
-            }
+    // Check if this series should be excluded based on library configuration
+    if let Some(ref exclude_libraries) = config.exclude_libraries {
+        if exclude_libraries.contains(&library.name) {
+            info!("Series '{}' is in excluded library '{}', skipping Discord RPC", series.title.as_deref().unwrap_or("Untitled"), library.name);
+            discord.clear_activity()?;
+            return Ok(());
         }
     }
-    let authors: Vec<String> = book.authors.iter().map(|a| a.name.clone()).collect();
+    let authors: Vec<String> = series.authors.as_ref().map_or(vec![], |a| a.iter().map(|a| a.name.clone()).collect());
     let author_text = if authors.is_empty() {
         "Unknown Author".to_string()
     } else {
         authors.join(", ")
-    };    let book_name = &book.title;
+    };
+    let series_title = series.title.as_deref().unwrap_or("Untitled");
 
     // At this point, we know we have recent activity, so we can proceed with setting Discord status
 
-    if current_book.as_ref().map_or(true, |b| b.id != book.id) {
-        *current_book = Some(Book {
-            id: book.id,
-            name: book_name.clone(),
-            authors: authors.clone(),
+    if current_series.as_ref().map_or(true, |s| s.id != series.id) {
+        *current_series = Some(Series {
+            id: series.id.clone(),
+            title: series.title.clone(),
+            authors: series.authors.clone(),
+            processing_status: series.processing_status.clone(),
         });
         *playback_state = PlaybackState {
             last_api_time: SystemTime::now(),
@@ -398,15 +413,15 @@ async fn set_activity(
     }    let large_text = if config.show_progress.unwrap_or(false) {
         "Reading"
     } else {
-        "Storyteller"
+        "Komga"
     };
 
     let activity_builder = activity::Activity::new()
-        .details(book_name)
+        .details(series_title)
         .state(&author_text)
         .activity_type(activity::ActivityType::Playing);
 
-    let cover_url = get_storyteller_cover_path(client, config, access_token, book.id, imgur_cache).await?;
+    let cover_url = get_komga_cover_path(client, config, &series.id, imgur_cache).await?;
 
     let final_activity = if let Some(ref url) = cover_url {
         activity_builder.assets(
@@ -425,121 +440,48 @@ async fn set_activity(
     Ok(())
 }
 
-async fn authenticate_storyteller(
+async fn get_komga_cover_path(
     client: &Client,
     config: &Config,
-) -> Result<String, Box<dyn std::error::Error>> {
-    let login_request = LoginRequest {
-        username: config.storyteller_username.clone(),
-        password: config.storyteller_password.clone(),
-    };
-
-    // Try /api/token first (v0.2+), then fall back to /token (v0.1)
-    let endpoints = [
-        format!("{}/api/token", config.storyteller_url),
-        format!("{}/token", config.storyteller_url),
-    ];
-    
-    for token_url in &endpoints {
-        let resp = client
-            .post(token_url)
-            .form(&login_request)
-            .send()
-            .await?;
-
-        if resp.status().is_success() {
-            let login_response: LoginResponse = resp.json().await?;
-            return Ok(login_response.access_token);
-        }
-        
-        // If we get a 404, try the next endpoint
-        if resp.status() == reqwest::StatusCode::NOT_FOUND {
-            continue;
-        }
-        
-        // For other errors, return them immediately
-        return Err(format!("Authentication failed with status: {}", resp.status()).into());
-    }
-    
-    Err("Authentication failed: no working token endpoint found".into())
-}
-
-fn should_show_as_reading(now: &SystemTime, playback_state: &PlaybackState) -> bool {
-    // Simple heuristic: show as reading if it's been less than 30 minutes since last activity
-    // In a real implementation, you'd track actual reading state from the mobile app or web interface
-    if let Ok(elapsed) = now.duration_since(playback_state.last_api_time) {
-        elapsed.as_secs() < 1800 // 30 minutes
-    } else {
-        false
-    }
-}
-
-fn should_show_as_reading_with_timestamp(now: &SystemTime, position_timestamp: u64) -> bool {
-    // Show as reading if the last position update was within the last 5 minutes
-    if let Ok(now_timestamp) = now.duration_since(SystemTime::UNIX_EPOCH) {
-        let now_ms = now_timestamp.as_millis() as u64;
-        let time_since_activity_ms = now_ms.saturating_sub(position_timestamp);
-        let time_since_activity_secs = time_since_activity_ms / 1000;
-        
-        // Consider "reading" if activity within last 5 minutes (300 seconds)
-        time_since_activity_secs < 300
-    } else {
-        false
-    }
-}
-
-async fn get_storyteller_cover_path(
-    client: &Client,
-    config: &Config,
-    access_token: &str,
-    book_id: i64,
+    series_id: &str,
     imgur_cache: &mut HashMap<String, String>,
 ) -> Result<Option<String>, Box<dyn std::error::Error>> {
-    if config.use_storyteller_cover.unwrap_or(true) {
+    if config.use_imgur_cover.unwrap_or(true) {
         if let Some(imgur_client_id) = &config.imgur_client_id {
-            let cache_key = format!("storyteller_{}", book_id);
+            let cache_key = format!("komga_{}", series_id);
             
             // Check cache first
             if let Some(cached_url) = imgur_cache.get(&cache_key) {
                 return Ok(Some(cached_url.clone()));
-            }            // Get cover from Storyteller server - try /api/books/{id}/cover first, then /books/{id}/cover
-            let cover_endpoints = [
-                format!("{}/api/books/{}/cover", config.storyteller_url, book_id),
-                format!("{}/books/{}/cover", config.storyteller_url, book_id),
-            ];
-              for cover_url in &cover_endpoints {
-                let response = client
-                    .get(cover_url)
-                    .bearer_auth(access_token)
-                    .send()
-                    .await;
+            }            // Get cover from Komga - try /api/v1/series/{id}/thumbnail first, then fallback to Imgur
+            let cover_url = format!("{}/api/v1/series/{}/thumbnail", config.komga_url, series_id);
+            let response = client
+                .get(&cover_url)
+                .header("X-API-Key", &config.komga_api_key)
+                .send()
+                .await;
 
-                if let Ok(resp) = response {
-                    let status = resp.status();
-                    
-                    if status.is_success() {
-                        let cover_bytes = resp.bytes().await?;
-                        
-                        // Upload to Imgur
-                        if let Ok(imgur_url) = upload_to_imgur(client, imgur_client_id, &cover_bytes).await {
-                            imgur_cache.insert(cache_key, imgur_url.clone());
-                            return Ok(Some(imgur_url));
-                        }
+            if let Ok(resp) = response {
+                let status = resp.status();
+                if status.is_success() {
+                    let cover_bytes = resp.bytes().await?;
+                    // Upload to Imgur
+                    if let Ok(imgur_url) = upload_to_imgur(client, imgur_client_id, &cover_bytes).await {
+                        imgur_cache.insert(cache_key, imgur_url.clone());
+                        return Ok(Some(imgur_url));
                     }
-                    
-                    // If we get a 404, try the next endpoint
-                    if status == reqwest::StatusCode::NOT_FOUND {
-                        continue;
-                    }
-                    
-                    // For other errors, break and continue with fallback
-                    break;
                 }
+                // If we get a 404, just return None
+                if status == reqwest::StatusCode::NOT_FOUND {
+                    return Ok(None);
+                }
+                // For other errors, just return None
+                return Ok(None);
             }
         }
     }
 
-    // Fallback: no cover available for Storyteller right now
+    // Fallback: no cover available for Komga right now
     // Could potentially implement external cover search here like the original
     Ok(None)
 }
@@ -602,3 +544,16 @@ async fn check_for_update(client: &Client) -> Result<Option<String>, Box<dyn std
     }
 }
 */
+
+fn should_show_as_reading_with_timestamp(now: &SystemTime, position_timestamp: u64) -> bool {
+    // Show as reading if the last position update was within the last 5 minutes
+    if let Ok(now_timestamp) = now.duration_since(SystemTime::UNIX_EPOCH) {
+        let now_ms = now_timestamp.as_millis() as u64;
+        let time_since_activity_ms = now_ms.saturating_sub(position_timestamp);
+        let time_since_activity_secs = time_since_activity_ms / 1000;
+        // Consider "reading" if activity within last 5 minutes (300 seconds)
+        time_since_activity_secs < 300
+    } else {
+        false
+    }
+}
