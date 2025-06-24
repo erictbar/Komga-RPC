@@ -1,0 +1,10 @@
+{
+    "discord_client_id": "1387072571542999091",
+    "storyteller_url": "http://localhost:8001 OR https://storyteller.example.com", 
+    "storyteller_token": "YOUR_STORYTELLER_API_TOKEN",
+    "show_progress": true,
+
+    //This option will grab the covers from your Storyteller Server and upload them to imgur
+    "use_storyteller_cover": true,
+    "imgur_client_id": "GET FROM https://imgur.com/account/settings/apps"
+}

@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.storyteller.discord-rpc</string>
+    
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/Eric/Developer/Storyteller-RPC/target/release/storyteller-discord-rpc</string>
+        <string>-c</string>
+        <string>/Users/Eric/Developer/Storyteller-RPC/target/release/config.json</string>
+    </array>
+    
+    <key>RunAtLoad</key>
+    <true/>
+    
+    <key>KeepAlive</key>
+    <true/>
+    
+    <key>StandardOutPath</key>
+    <string>/Users/Eric/Library/Logs/storyteller-discord-rpc.log</string>
+    
+    <key>StandardErrorPath</key>
+    <string>/Users/Eric/Library/Logs/storyteller-discord-rpc-error.log</string>
+    
+    <key>WorkingDirectory</key>
+    <string>/Users/Eric/Developer/Storyteller-RPC</string>
+    
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>RUST_LOG</key>
+        <string>info</string>
+    </dict>
+</dict>
+</plist>

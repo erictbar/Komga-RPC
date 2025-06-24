@@ -1,0 +1,14 @@
+{
+    "discord_client_id": "1387072571542999091",
+    "storyteller_url": "http://localhost:8001 OR https://storyteller.example.com", 
+    "storyteller_username": "YOUR_STORYTELLER_USERNAME",
+    "storyteller_password": "YOUR_STORYTELLER_PASSWORD",
+    "show_progress": true,
+
+    //This option will grab the covers from your Storyteller Server and upload them to imgur
+    "use_storyteller_cover": true,
+    "imgur_client_id": "GET FROM https://imgur.com/account/settings/apps",
+
+    //Optional: exclude books containing these keywords from Discord RPC for privacy
+    "exclude_keywords": ["Private", "Personal", "Work"]
+}
