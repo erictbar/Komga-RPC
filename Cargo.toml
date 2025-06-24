@@ -1,9 +1,9 @@
 [package]
-name = "storyteller-discord-rpc"
+name = "komga-discord-rpc"
 version = "0.1.0"
 edition = "2021"
 authors = ["Eric Barbosa <eric@erictb.com.com>"]
-description = "Displays what you're listening to on Storyteller on Discord"
+description = "Displays what you're reading on Komga on Discord"
 
 
 [dependencies]
