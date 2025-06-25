@@ -3,11 +3,11 @@
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>com.storyteller.discord-rpc</string>
+    <string>com.komga.discord-rpc</string>
     
     <key>ProgramArguments</key>
     <array>
-        <string>/Users/Eric/Developer/Komga-RPC/target/release/storyteller-discord-rpc</string>
+        <string>/Users/Eric/Developer/Komga-RPC/target/release/komga-discord-rpc</string>
         <string>-c</string>
         <string>/Users/Eric/Developer/Komga-RPC/target/release/config.json</string>
     </array>
