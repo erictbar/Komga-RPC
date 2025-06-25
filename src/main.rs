@@ -136,24 +136,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
     let client = Client::new();
-
-    // Update check disabled: no releases page yet
-    // if let Some(latest_version) = check_for_update(&client).await? {
-    //     info!(
-    //         "A new version is available: {}. You're currently running version {}.",
-    //         latest_version, CURRENT_VERSION
-    //     );
-    //     info!("Please re-run the installer or visit https://github.com/erictbar/Storyteller-RPC to download the latest version.");
-    // } else {
-    //     info!("You're running the latest version: {}", CURRENT_VERSION);
-    // }
-
     let config_file = parse_args()?;
     info!("Using config file: {}", config_file);
-
     let config = load_config(&config_file)?;
-    let mut discord = DiscordIpcClient::new(&config.discord_client_id);    discord.connect()?;
-    info!("Komga Discord RPC Connected!");    let mut playback_state = PlaybackState {
+    let mut discord = DiscordIpcClient::new(&config.discord_client_id);
+    discord.connect()?;
+    info!("Komga Discord RPC Connected!");
+    let mut playback_state = PlaybackState {
         last_api_time: SystemTime::now(),
         is_reading: false,
     };
@@ -161,75 +150,101 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut timing_info = TimingInfo {
         last_api_time: None,
         last_position: None,
-    };    let mut imgur_cache: HashMap<String, String> = HashMap::new();
+    };
+    let mut imgur_cache: HashMap<String, String> = HashMap::new();
+    let mut last_series_id: Option<String> = None;
+    let mut last_series_time: Option<SystemTime> = None;
 
     loop {
-        if let Err(e) = set_activity(
-            &client,
-            &config,
-            &mut discord,
-            &mut playback_state,
-            &mut current_series,
-            &mut timing_info,
-            &mut imgur_cache,
-        )        .await
-        {
-            let mut is_pipe_error = false;
-            let mut is_auth_error = false;
-
-            // Check for authentication errors
-            if let Some(source_err) = e.downcast_ref::<reqwest::Error>() {
-                if let Some(status) = source_err.status() {
-                    if status == reqwest::StatusCode::UNAUTHORIZED {
-                        is_auth_error = true;
-                    }
+        let now = SystemTime::now();
+        let mut should_update = true;
+        if let (Some(series), Some(last_time)) = (&current_series, last_series_time) {
+            if let Ok(elapsed) = now.duration_since(last_time) {
+                if elapsed.as_secs() < 300 {
+                    // Only update if a newer series/book is found, else keep current for 5 minutes
+                    should_update = false;
                 }
-            }
-
-            if let Some(io_err) = e.downcast_ref::<std::io::Error>() {
-                if io_err.kind() == ErrorKind::BrokenPipe || io_err.raw_os_error() == Some(232) || io_err.raw_os_error() == Some(32) {
-                    is_pipe_error = true;
-                }
-            }
-
-            if !is_pipe_error && !is_auth_error {
-                let mut source = e.source();
-                while let Some(err) = source {
-                    if let Some(io_err) = err.downcast_ref::<std::io::Error>() {
-                        if io_err.kind() == ErrorKind::BrokenPipe || io_err.raw_os_error() == Some(232) || io_err.raw_os_error() == Some(32) {
-                            is_pipe_error = true;
-                            break;
-                        }
-                    }
-                    source = err.source();
-                }
-            }
-
-            if is_auth_error {
-                warn!("Authentication expired, re-authenticating...");
-                // access_token = None;
-                continue;
-            }
-
-            if is_pipe_error {
-                warn!("Connection to Discord lost (pipe closed). Attempting to reconnect...");
-                if let Err(close_err) = discord.close() {
-                    error!("Error closing old Discord client (connection likely already broken): {}", close_err);
-                }
-                time::sleep(Duration::from_secs(5)).await;
-                let mut new_discord = DiscordIpcClient::new(&config.discord_client_id);
-                if let Err(connect_err) = new_discord.connect() {
-                    error!("Failed to reconnect to Discord: {}", connect_err);
-                } else {
-                    info!("Successfully reconnected to Discord.");
-                    discord = new_discord;
-                }
-            } else {
-                error!("Error setting activity (not identified as pipe error): {}", e);
-                error!("Full error details: {:?}", e);
             }
         }
-        time::sleep(Duration::from_secs(15)).await;
+        // Always check for a newer series/book every 20 seconds
+        let mut found_newer = false;
+        if should_update {
+            if let Err(e) = set_activity(
+                &client,
+                &config,
+                &mut discord,
+                &mut playback_state,
+                &mut current_series,
+                &mut timing_info,
+                &mut imgur_cache,
+            ).await {
+                let mut is_pipe_error = false;
+                let mut is_auth_error = false;
+
+                // Check for authentication errors
+                if let Some(source_err) = e.downcast_ref::<reqwest::Error>() {
+                    if let Some(status) = source_err.status() {
+                        if status == reqwest::StatusCode::UNAUTHORIZED {
+                            is_auth_error = true;
+                        }
+                    }
+                }
+
+                if let Some(io_err) = e.downcast_ref::<std::io::Error>() {
+                    if io_err.kind() == ErrorKind::BrokenPipe || io_err.raw_os_error() == Some(232) || io_err.raw_os_error() == Some(32) {
+                        is_pipe_error = true;
+                    }
+                }
+
+                if !is_pipe_error && !is_auth_error {
+                    let mut source = e.source();
+                    while let Some(err) = source {
+                        if let Some(io_err) = err.downcast_ref::<std::io::Error>() {
+                            if io_err.kind() == ErrorKind::BrokenPipe || io_err.raw_os_error() == Some(232) || io_err.raw_os_error() == Some(32) {
+                                is_pipe_error = true;
+                                break;
+                            }
+                        }
+                        source = err.source();
+                    }
+                }
+
+                if is_auth_error {
+                    warn!("Authentication expired, re-authenticating...");
+                    // access_token = None;
+                    continue;
+                }
+
+                if is_pipe_error {
+                    warn!("Connection to Discord lost (pipe closed). Attempting to reconnect...");
+                    if let Err(close_err) = discord.close() {
+                        error!("Error closing old Discord client (connection likely already broken): {}", close_err);
+                    }
+                    time::sleep(Duration::from_secs(5)).await;
+                    let mut new_discord = DiscordIpcClient::new(&config.discord_client_id);
+                    if let Err(connect_err) = new_discord.connect() {
+                        error!("Failed to reconnect to Discord: {}", connect_err);
+                    } else {
+                        info!("Successfully reconnected to Discord.");
+                        discord = new_discord;
+                    }
+                } else {
+                    error!("Error setting activity (not identified as pipe error): {}", e);
+                    error!("Full error details: {:?}", e);
+                }
+            } else {
+                // Update the last_series_id and last_series_time if a new series is set
+                if let Some(series) = &current_series {
+                    if last_series_id.as_ref().map_or(true, |id| id != &series.id) {
+                        last_series_id = Some(series.id.clone());
+                        last_series_time = Some(SystemTime::now());
+                        found_newer = true;
+                    }
+                }
+            }
+        }
+        // If not updating, just wait 20 seconds
+        time::sleep(Duration::from_secs(20)).await;
     }
 }
 
@@ -289,8 +304,9 @@ async fn set_activity(
     // Use the most recently updated book (first in the sorted list)
     let book = &books[0];
     let book_id = book.get("id").and_then(|v| v.as_str()).unwrap_or("");
-    let book_title = book.get("title").and_then(|v| v.as_str()).unwrap_or("Untitled");
+    let book_title = book.get("title").and_then(|v| v.as_str());
     let series_id = book.get("seriesId").and_then(|v| v.as_str()).unwrap_or("");
+    let library_id = book.get("libraryId").and_then(|v| v.as_str()).unwrap_or("");
     let page = book.get("readProgress").and_then(|rp| rp.get("page")).and_then(|v| v.as_u64()).map(|v| v as u32);
     let last_modified_str = book.get("readProgress").and_then(|rp| rp.get("lastModified")).and_then(|v| v.as_str());
     let last_modified = last_modified_str.and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok()).map(|dt| dt.with_timezone(&Utc));
@@ -322,17 +338,56 @@ async fn set_activity(
         return Ok(());
     }
     let series: Series = response.json().await?;
-
-    // Check if this series should be excluded based on library configuration
-    // (You may want to fetch the library name if needed, or skip this if not required)
-
-    let authors: Vec<String> = series.authors.as_ref().map_or(vec![], |a| a.iter().map(|a| a.name.clone()).collect());
-    let author_text = if authors.is_empty() {
-        "Unknown Author".to_string()
-    } else {
-        authors.join(", ")
-    };
     let series_title = series.title.as_deref().unwrap_or("Untitled");
+
+    // Fetch library name if needed
+    let mut library_name = None;
+    if library_id != "" {
+        let library_url = format!("{}/api/v1/libraries/{}", config.komga_url, library_id);
+        let response = client
+            .get(&library_url)
+            .header("X-API-Key", &config.komga_api_key)
+            .send()
+            .await?;
+        if response.status().is_success() {
+            let library: serde_json::Value = response.json().await?;
+            library_name = library.get("name").and_then(|v| v.as_str()).map(|s| s.to_string());
+        }
+    }
+
+    // Authors: prefer book authors, then series authors, else library name
+    let mut authors: Vec<String> = vec![];
+    if let Some(book_authors) = book.get("metadata").and_then(|m| m.get("authors")).and_then(|a| a.as_array()) {
+        for a in book_authors {
+            if let Some(name) = a.get("name").and_then(|v| v.as_str()) {
+                authors.push(name.to_string());
+            }
+        }
+    }
+    if authors.is_empty() {
+        if let Some(series_authors) = &series.authors {
+            for a in series_authors {
+                authors.push(a.name.clone());
+            }
+        }
+    }
+    let author_text = if !authors.is_empty() {
+        authors.join(", ")
+    } else if let Some(lib_name) = &library_name {
+        lib_name.clone()
+    } else {
+        "Unknown Author".to_string()
+    };
+
+    // Details: prefer book title, else series title
+    let mut details = if let Some(title) = book_title {
+        title.to_string()
+    } else {
+        series_title.to_string()
+    };
+    if let Some(page_num) = page {
+        details = format!("{} (Page {})", details, page_num);
+    }
 
     if current_series.as_ref().map_or(true, |s| s.id != series.id) {
         *current_series = Some(series.clone());
@@ -346,11 +401,6 @@ async fn set_activity(
     } else {
         "Komga"
     };
-
-    let mut details = format!("{}", series_title);
-    if let Some(page_num) = page {
-        details = format!("{} (Page {})", series_title, page_num);
-    }
 
     let activity_builder = activity::Activity::new()
         .details(&details)
