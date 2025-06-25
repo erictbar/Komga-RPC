@@ -10,7 +10,7 @@ use log::{info, error, warn};
 use env_logger;
 use std::io::ErrorKind;
 use std::collections::HashMap;
-use chrono::{DateTime, Utc};
+use chrono::Utc;
 
 const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -156,6 +156,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut last_series_time: Option<SystemTime> = None;
     let mut current_book_id: Option<String> = None;
     let mut current_series_id: Option<String> = None;
+    let mut current_series_title: Option<String> = None;
     let mut last_full_check = SystemTime::now();
     let mut last_page_update = SystemTime::now();
     let full_check_interval = Duration::from_secs(20);
@@ -241,8 +242,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
         } else if do_page_update {
-            // Only update page number for current book
-            if let (Some(ref book_id), Some(ref series_id)) = (&current_book_id, &current_series_id) {
+            if let (Some(ref book_id), Some(ref series_id), Some(ref series_title)) = (&current_book_id, &current_series_id, &current_series_title) {
                 let book_url = format!("{}/api/v1/books/{}", config.komga_url, book_id);
                 let response = client
                     .get(&book_url)
@@ -252,8 +252,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 if response.status().is_success() {
                     let book: serde_json::Value = response.json().await?;
                     let page_num = book.get("readProgress").and_then(|rp| rp.get("page")).and_then(|v| v.as_u64()).map(|v| v as u32);
-
-                    // Rebuild Discord activity with updated page_num
                     let details = series_title.to_string();
                     let mut state = book.get("metadata")
                         .and_then(|m| m.get("title"))
@@ -262,18 +260,36 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         .or_else(|| book.get("title").and_then(|v| v.as_str()).map(|s| s.to_string()))
                         .or_else(|| book.get("name").and_then(|v| v.as_str()).map(|s| s.to_string()))
                         .unwrap_or_else(|| "Untitled Book".to_string());
-                    if let Some(page_num) = page_num {
-                        state = format!("{} (Page {})", state, page_num);
-                    }
-                    let large_text = "Komga-RPC";
+                    let details = if let Some(page_num) = page_num {
+                        format!("{} (Page {})", state, page_num)
+                    } else {
+                        state.clone()
+                    };
+                    let state = "Komga-RPC";
 
+                    // Fetch the latest series title for this book
+                    let series_url = format!("{}/api/v1/series/{}", config.komga_url, series_id);
+                    let series_response = client
+                        .get(&series_url)
+                        .header("X-API-Key", &config.komga_api_key)
+                        .send()
+                        .await?;
+                    let series_title = if series_response.status().is_success() {
+                        let series_json: serde_json::Value = series_response.json().await?;
+                        series_json.get("title")
+                            .and_then(|v| v.as_str())
+                            .or_else(|| series_json.get("metadata").and_then(|m| m.get("title")).and_then(|v| v.as_str()))
+                            .unwrap_or("Untitled")
+                            .to_string()
+                    } else {
+                        "Untitled".to_string()
+                    };
+                    let large_text = &series_title;
+                    let cover_url = get_komga_cover_path(&client, &config, series_id, &mut imgur_cache).await?;
                     let activity_builder = activity::Activity::new()
                         .details(&details)
-                        .state(&state)
+                        .state(state)
                         .activity_type(activity::ActivityType::Playing);
-
-                    let cover_url = get_komga_cover_path(client, config, &series.id, imgur_cache).await?;
-
                     let final_activity = if let Some(ref url) = cover_url {
                         activity_builder.assets(
                             activity::Assets::new()
@@ -283,7 +299,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     } else {
                         activity_builder
                     };
-
                     discord.set_activity(final_activity)?;
                 }
             }
@@ -429,7 +444,25 @@ async fn set_activity(
         return Ok(());
     }
     let series: Series = response.json().await?;
-    let series_title = series.title.as_deref().unwrap_or("Untitled");
+    info!("series object: {:?}", series);
+    let mut series_title = series.title.clone();
+    if series_title.is_none() {
+        // If title is missing, fetch as JSON and try metadata.title
+        let response = client
+            .get(&series_url)
+            .header("X-API-Key", &config.komga_api_key)
+            .send()
+            .await?;
+        if response.status().is_success() {
+            let series_json: serde_json::Value = response.json().await?;
+            series_title = series_json.get("metadata")
+                .and_then(|m| m.get("title"))
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+        }
+    }
+    let series_title = series_title.unwrap_or_else(|| "Untitled".to_string());
+    info!("series_title resolved = {}", series_title);
 
     // Fetch library name if needed
     let mut library_name = None;
@@ -471,7 +504,8 @@ async fn set_activity(
     };
 
     // Details: series title (first line)
-    let details = series_title.to_string();
+    let details = series_title.clone();
+    info!("details = {}", details);
     // State: book title and page (second line)
     let mut state = book.get("metadata")
         .and_then(|m| m.get("title"))
@@ -483,14 +517,14 @@ async fn set_activity(
     if let Some(page_num) = page_num {
         state = format!("{} (Page {})", state, page_num);
     }
-    let large_text = "Komga-RPC";
+    let large_text = &details;
 
     let activity_builder = activity::Activity::new()
         .details(&details)
         .state(&state)
         .activity_type(activity::ActivityType::Playing);
 
-    let cover_url = get_komga_cover_path(client, config, &series.id, imgur_cache).await?;
+    let cover_url = get_komga_cover_path(client, config, &series_id, imgur_cache).await?;
 
     let final_activity = if let Some(ref url) = cover_url {
         activity_builder.assets(
