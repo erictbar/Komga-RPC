@@ -154,21 +154,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut imgur_cache: HashMap<String, String> = HashMap::new();
     let mut last_series_id: Option<String> = None;
     let mut last_series_time: Option<SystemTime> = None;
+    let mut current_book_id: Option<String> = None;
+    let mut current_series_id: Option<String> = None;
+    let mut last_full_check = SystemTime::now();
+    let mut last_page_update = SystemTime::now();
+    let full_check_interval = Duration::from_secs(20);
+    let page_update_interval = Duration::from_secs(5);
 
     loop {
         let now = SystemTime::now();
-        let mut should_update = true;
-        if let (Some(series), Some(last_time)) = (&current_series, last_series_time) {
-            if let Ok(elapsed) = now.duration_since(last_time) {
-                if elapsed.as_secs() < 300 {
-                    // Only update if a newer series/book is found, else keep current for 5 minutes
-                    should_update = false;
-                }
-            }
-        }
-        // Always check for a newer series/book every 20 seconds
-        let mut found_newer = false;
-        if should_update {
+        let do_full_check = last_full_check.elapsed().unwrap_or(Duration::from_secs(0)) >= full_check_interval;
+        let do_page_update = last_page_update.elapsed().unwrap_or(Duration::from_secs(0)) >= page_update_interval;
+
+        if do_full_check {
+            // Full scan for most recent in-progress book (as before)
             if let Err(e) = set_activity(
                 &client,
                 &config,
@@ -238,13 +237,60 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     if last_series_id.as_ref().map_or(true, |id| id != &series.id) {
                         last_series_id = Some(series.id.clone());
                         last_series_time = Some(SystemTime::now());
-                        found_newer = true;
                     }
                 }
             }
+        } else if do_page_update {
+            // Only update page number for current book
+            if let (Some(ref book_id), Some(ref series_id)) = (&current_book_id, &current_series_id) {
+                let book_url = format!("{}/api/v1/books/{}", config.komga_url, book_id);
+                let response = client
+                    .get(&book_url)
+                    .header("X-API-Key", &config.komga_api_key)
+                    .send()
+                    .await?;
+                if response.status().is_success() {
+                    let book: serde_json::Value = response.json().await?;
+                    let page_num = book.get("readProgress").and_then(|rp| rp.get("page")).and_then(|v| v.as_u64()).map(|v| v as u32);
+
+                    // Rebuild Discord activity with updated page_num
+                    let details = series_title.to_string();
+                    let mut state = book.get("metadata")
+                        .and_then(|m| m.get("title"))
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string())
+                        .or_else(|| book.get("title").and_then(|v| v.as_str()).map(|s| s.to_string()))
+                        .or_else(|| book.get("name").and_then(|v| v.as_str()).map(|s| s.to_string()))
+                        .unwrap_or_else(|| "Untitled Book".to_string());
+                    if let Some(page_num) = page_num {
+                        state = format!("{} (Page {})", state, page_num);
+                    }
+                    let large_text = "Komga-RPC";
+
+                    let activity_builder = activity::Activity::new()
+                        .details(&details)
+                        .state(&state)
+                        .activity_type(activity::ActivityType::Playing);
+
+                    let cover_url = get_komga_cover_path(client, config, &series.id, imgur_cache).await?;
+
+                    let final_activity = if let Some(ref url) = cover_url {
+                        activity_builder.assets(
+                            activity::Assets::new()
+                                .large_image(url)
+                                .large_text(large_text)
+                        )
+                    } else {
+                        activity_builder
+                    };
+
+                    discord.set_activity(final_activity)?;
+                }
+            }
+            last_page_update = SystemTime::now();
         }
-        // If not updating, just wait 20 seconds
-        time::sleep(Duration::from_secs(20)).await;
+        // If not updating, just wait 1 second
+        time::sleep(Duration::from_secs(1)).await;
     }
 }
 
