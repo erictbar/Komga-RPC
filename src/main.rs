@@ -261,139 +261,71 @@ async fn set_activity(
     current_series: &mut Option<Series>,
     timing_info: &mut TimingInfo,
     imgur_cache: &mut HashMap<String, String>,
-) -> Result<(), Box<dyn std::error::Error>> {    // Get all libraries from Komga
-    let libraries_url = format!("{}/api/v1/libraries", config.komga_url);
+) -> Result<(), Box<dyn std::error::Error>> {
+    // Fetch in-progress books, sorted by most recently updated
+    let books_url = format!(
+        "{}/api/v1/books?readStatus=IN_PROGRESS&sort=lastModified,desc",
+        config.komga_url
+    );
     let response = client
-        .get(&libraries_url)
+        .get(&books_url)
         .header("X-API-Key", &config.komga_api_key)
         .send()
         .await?;
 
     if !response.status().is_success() {
-        return Err(format!("Failed to fetch libraries with status: {}", response.status()).into());
+        return Err(format!("Failed to fetch in-progress books with status: {}", response.status()).into());
     }
 
-    let libraries: Vec<Library> = response.json().await?;
+    let books_page: serde_json::Value = response.json().await?;
+    let books = books_page.get("content").and_then(|c| c.as_array()).cloned().unwrap_or_default();
 
-    if libraries.is_empty() {
-        info!("No libraries found in Komga");
+    if books.is_empty() {
+        info!("No in-progress books found in Komga");
         discord.clear_activity()?;
         return Ok(());
     }
 
-    // For now, just pick the first library - in the future, we might want to allow
-    // configuration of which library to use, or cycle through multiple libraries
-    let library = &libraries[0];
+    // Use the most recently updated book (first in the sorted list)
+    let book = &books[0];
+    let book_id = book.get("id").and_then(|v| v.as_str()).unwrap_or("");
+    let book_title = book.get("title").and_then(|v| v.as_str()).unwrap_or("Untitled");
+    let series_id = book.get("seriesId").and_then(|v| v.as_str()).unwrap_or("");
+    let page = book.get("readProgress").and_then(|rp| rp.get("page")).and_then(|v| v.as_u64()).map(|v| v as u32);
+    let last_modified_str = book.get("readProgress").and_then(|rp| rp.get("lastModified")).and_then(|v| v.as_str());
+    let last_modified = last_modified_str.and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok()).map(|dt| dt.with_timezone(&Utc));
 
-    // Get all series in the library (use correct Komga endpoint)
-    let series_url = format!("{}/api/v1/series?library_id={}", config.komga_url, library.id);
+    // Only show as reading if updated in the last 5 minutes
+    let now = Utc::now();
+    if let Some(updated_at) = last_modified {
+        if (now - updated_at).num_seconds() >= 300 {
+            info!("Most recent in-progress book activity is too old (timestamp: {}), clearing Discord status", updated_at);
+            discord.clear_activity()?;
+            return Ok(());
+        }
+    } else {
+        info!("No valid lastModified timestamp for most recent in-progress book, clearing Discord status");
+        discord.clear_activity()?;
+        return Ok(());
+    }
+
+    // Fetch series info for the book
+    let series_url = format!("{}/api/v1/series/{}", config.komga_url, series_id);
     let response = client
         .get(&series_url)
         .header("X-API-Key", &config.komga_api_key)
         .send()
         .await?;
-
     if !response.status().is_success() {
-        let status = response.status();
-        let text = response.text().await.unwrap_or_default();
-        error!("Failed to fetch series with status: {}. Body: {}", status, text);
-        return Err(format!("Failed to fetch series with status: {}", status).into());
-    }
-
-    let series_page: SeriesPage = response.json().await?;
-    let series_list = series_page.content;
-
-    if series_list.is_empty() {
-        info!("No series found in Komga library");
+        error!("Failed to fetch series info for book {}", book_id);
         discord.clear_activity()?;
         return Ok(());
     }
-
-    // Find the book with the most recent reading activity (within 5 minutes)
-    let mut most_recent: Option<(Series, Book, DateTime<Utc>, Option<u32>)> = None;
-    for series in &series_list {
-        // Skip series if they are in a failed or completed state
-        if let Some(ref status_obj) = series.processing_status {
-            if status_obj.status == ProcessingStatus::Failed || status_obj.status == ProcessingStatus::Completed {
-                continue;
-            }
-        }
-        // Fetch books for this series
-        let books_url = format!("{}/api/v1/series/{}/books", config.komga_url, series.id);
-        
-        match client
-            .get(&books_url)
-            .header("X-API-Key", &config.komga_api_key)
-            .send()
-            .await
-        {
-            Ok(response) => {
-                if response.status().is_success() {
-                    // Get the last book in the series (assuming the last book is the most recent)
-                    if let Ok(books) = response.json::<Vec<Book>>().await {
-                        if let Some(last_book) = books.last() {
-                            // Now get the read progress for this book
-                            let progress_url = format!("{}/api/v1/books/{}/progress", config.komga_url, last_book.id);
-                            
-                            match client
-                                .get(&progress_url)
-                                .header("X-API-Key", &config.komga_api_key)
-                                .send()
-                                .await
-                            {
-                                Ok(progress_response) => {
-                                    if progress_response.status().is_success() {
-                                        if let Ok(progress) = progress_response.json::<BookReadProgress>().await {
-                                            if let Some(updated_at_str) = &progress.updated_at {
-                                                if let Ok(updated_at) = DateTime::parse_from_rfc3339(updated_at_str) {
-                                                    let updated_at_utc = updated_at.with_timezone(&Utc);
-                                                    if most_recent.as_ref().map_or(true, |(_, _, timestamp, _)| updated_at_utc > *timestamp) {
-                                                        most_recent = Some((series.clone(), last_book.clone(), updated_at_utc, Some(progress.page.unwrap_or(0))));
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                                Err(_) => {
-                                    // Ignore errors when fetching progress
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            Err(_) => {
-                // Ignore errors when fetching books
-            }
-        }
-    }    // Check if we have recent activity, or clear Discord status
-    let series = if let Some((series, book, updated_at, page)) = most_recent {
-        // Check if the activity is recent enough
-        let now = Utc::now();
-        if (now - updated_at).num_seconds() < 300 {
-            info!("Found most recently active series: {} (last activity: {})", series.title.as_deref().unwrap_or("Untitled"), updated_at);
-            series
-        } else {
-            info!("Most recent series activity is too old (timestamp: {}), clearing Discord status", updated_at);
-            discord.clear_activity()?;
-            return Ok(());
-        }
-    } else {
-        // No position data found for any series, clear Discord status
-        info!("No position data found for any series, clearing Discord status");
-        discord.clear_activity()?;
-        return Ok(());
-    };
+    let series: Series = response.json().await?;
 
     // Check if this series should be excluded based on library configuration
-    if let Some(ref exclude_libraries) = config.exclude_libraries {
-        if exclude_libraries.contains(&library.name) {
-            info!("Series '{}' is in excluded library '{}', skipping Discord RPC", series.title.as_deref().unwrap_or("Untitled"), library.name);
-            discord.clear_activity()?;
-            return Ok(());
-        }
-    }
+    // (You may want to fetch the library name if needed, or skip this if not required)
+
     let authors: Vec<String> = series.authors.as_ref().map_or(vec![], |a| a.iter().map(|a| a.name.clone()).collect());
     let author_text = if authors.is_empty() {
         "Unknown Author".to_string()
@@ -402,27 +334,26 @@ async fn set_activity(
     };
     let series_title = series.title.as_deref().unwrap_or("Untitled");
 
-    // At this point, we know we have recent activity, so we can proceed with setting Discord status
-
     if current_series.as_ref().map_or(true, |s| s.id != series.id) {
-        *current_series = Some(Series {
-            id: series.id.clone(),
-            title: series.title.clone(),
-            authors: series.authors.clone(),
-            processing_status: series.processing_status.clone(),
-        });
+        *current_series = Some(series.clone());
         *playback_state = PlaybackState {
             last_api_time: SystemTime::now(),
             is_reading: false,
         };
-    }    let large_text = if config.show_progress.unwrap_or(false) {
+    }
+    let large_text = if config.show_progress.unwrap_or(false) {
         "Reading"
     } else {
         "Komga"
     };
 
+    let mut details = format!("{}", series_title);
+    if let Some(page_num) = page {
+        details = format!("{} (Page {})", series_title, page_num);
+    }
+
     let activity_builder = activity::Activity::new()
-        .details(series_title)
+        .details(&details)
         .state(&author_text)
         .activity_type(activity::ActivityType::Playing);
 
@@ -439,9 +370,7 @@ async fn set_activity(
     };
 
     discord.set_activity(final_activity)?;
-    
     timing_info.last_api_time = Some(SystemTime::now());
-
     Ok(())
 }
 
