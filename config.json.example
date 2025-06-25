@@ -8,5 +8,11 @@
     "imgur_client_id": "YOUR_IMGUR_CLIENT_ID",
 
     // Optional: Exclude books from these libraries from Discord RPC
-    "exclude_libraries": ["Private", "Work"]
+    "exclude_libraries": ["Private", "Work"],
+
+    // Optional: Exclude books with these tags from Discord RPC
+    "exclude_tags": ["private", "hidden"],
+
+    // Optional: If a book or series has any of these tags, cover art will not be shown in Discord status
+    "nocover_tags": ["nsfw", "spoiler"]
 }

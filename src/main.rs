@@ -24,6 +24,7 @@ struct Config {
     imgur_client_id: Option<String>,
     exclude_libraries: Option<Vec<String>>,
     exclude_tags: Option<Vec<String>>,
+    nocover_tags: Option<Vec<String>>, // Tags for which cover art should be hidden
 }
 
 #[derive(Debug, Deserialize)]
@@ -286,7 +287,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         "Untitled".to_string()
                     };
                     let large_text = &series_title;
-                    let cover_url = get_komga_cover_path(&client, &config, series_id, &mut imgur_cache).await?;
+                    let cover_url = get_komga_cover_path(&client, &config, series_id, &mut imgur_cache, false).await?;
                     let activity_builder = activity::Activity::new()
                         .details(&details)
                         .state(state)
@@ -527,6 +528,37 @@ async fn set_activity(
             }
         }
     }
+    // Check for nocover tags (series or book)
+    let mut skip_cover = false;
+    if let Some(ref nocover_tags) = config.nocover_tags {
+        // Check series tags
+        let series_url = format!("{}/api/v1/series/{}", config.komga_url, series_id);
+        let response = client
+            .get(&series_url)
+            .header("X-API-Key", &config.komga_api_key)
+            .send()
+            .await?;
+        if response.status().is_success() {
+            let series_json: serde_json::Value = response.json().await?;
+            let series_tags = series_json.get("metadata")
+                .and_then(|m| m.get("tags"))
+                .and_then(|tags| tags.as_array());
+            if let Some(tags) = series_tags {
+                if tags.iter().filter_map(|t| t.as_str()).any(|tag| nocover_tags.iter().any(|ex| ex.eq_ignore_ascii_case(tag))) {
+                    skip_cover = true;
+                }
+            }
+        }
+        // Check book tags
+        let book_tags = book.get("metadata")
+            .and_then(|m| m.get("tags"))
+            .and_then(|tags| tags.as_array());
+        if let Some(tags) = book_tags {
+            if tags.iter().filter_map(|t| t.as_str()).any(|tag| nocover_tags.iter().any(|ex| ex.eq_ignore_ascii_case(tag))) {
+                skip_cover = true;
+            }
+        }
+    }
 
     // Authors: prefer book authors, then series authors, else library name
     let mut authors: Vec<String> = vec![];
@@ -572,7 +604,7 @@ async fn set_activity(
         .state(&state)
         .activity_type(activity::ActivityType::Playing);
 
-    let cover_url = get_komga_cover_path(client, config, &series_id, imgur_cache).await?;
+    let cover_url = get_komga_cover_path(client, config, &series_id, imgur_cache, skip_cover).await?;
 
     let final_activity = if let Some(ref url) = cover_url {
         activity_builder.assets(
@@ -594,7 +626,11 @@ async fn get_komga_cover_path(
     config: &Config,
     series_id: &str,
     imgur_cache: &mut HashMap<String, String>,
+    skip_cover: bool,
 ) -> Result<Option<String>, Box<dyn std::error::Error>> {
+    if skip_cover {
+        return Ok(None);
+    }
     if config.use_imgur_cover.unwrap_or(true) {
         if let Some(imgur_client_id) = &config.imgur_client_id {
             let cache_key = format!("komga_{}", series_id);
