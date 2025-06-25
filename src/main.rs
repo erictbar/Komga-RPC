@@ -505,7 +505,6 @@ async fn set_activity(
 
     // Details: series title (first line)
     let details = series_title.clone();
-    info!("details = {}", details);
     // State: book title and page (second line)
     let mut state = book.get("metadata")
         .and_then(|m| m.get("title"))
