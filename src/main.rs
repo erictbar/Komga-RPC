@@ -10,6 +10,7 @@ use log::{info, error, warn};
 use env_logger;
 use std::io::ErrorKind;
 use std::collections::HashMap;
+use chrono::{DateTime, Utc};
 
 const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -309,11 +310,11 @@ async fn set_activity(
     }
 
     // Find the book with the most recent reading activity (within 5 minutes)
-    let mut most_recent: Option<(Series, Book, u64, Option<u32>)> = None;
+    let mut most_recent: Option<(Series, Book, DateTime<Utc>, Option<u32>)> = None;
     for series in &series_list {
-        // Only skip series if they are in a failed state
+        // Skip series if they are in a failed or completed state
         if let Some(ref status_obj) = series.processing_status {
-            if status_obj.status == ProcessingStatus::Failed {
+            if status_obj.status == ProcessingStatus::Failed || status_obj.status == ProcessingStatus::Completed {
                 continue;
             }
         }
@@ -343,9 +344,13 @@ async fn set_activity(
                                 Ok(progress_response) => {
                                     if progress_response.status().is_success() {
                                         if let Ok(progress) = progress_response.json::<BookReadProgress>().await {
-                                            // Check if this is the most recent series+book combo
-                                            if most_recent.as_ref().map_or(true, |(_, _, timestamp, _)| progress.updated_at.as_ref().map_or(0, |t| t.parse::<u64>().unwrap_or(0)) > *timestamp) {
-                                                most_recent = Some((series.clone(), last_book.clone(), progress.updated_at.as_ref().map_or(0, |t| t.parse::<u64>().unwrap_or(0)), Some(progress.page.unwrap_or(0))));
+                                            if let Some(updated_at_str) = &progress.updated_at {
+                                                if let Ok(updated_at) = DateTime::parse_from_rfc3339(updated_at_str) {
+                                                    let updated_at_utc = updated_at.with_timezone(&Utc);
+                                                    if most_recent.as_ref().map_or(true, |(_, _, timestamp, _)| updated_at_utc > *timestamp) {
+                                                        most_recent = Some((series.clone(), last_book.clone(), updated_at_utc, Some(progress.page.unwrap_or(0))));
+                                                    }
+                                                }
                                             }
                                         }
                                     }
@@ -363,20 +368,20 @@ async fn set_activity(
             }
         }
     }    // Check if we have recent activity, or clear Discord status
-    let series = if let Some((series, book, timestamp, page)) = most_recent {
+    let series = if let Some((series, book, updated_at, page)) = most_recent {
         // Check if the activity is recent enough
-        let now = SystemTime::now();
-        if should_show_as_reading_with_timestamp(&now, timestamp) {
-            info!("Found most recently active series: {} (last activity: {})", series.title.as_deref().unwrap_or("Untitled"), timestamp);
+        let now = Utc::now();
+        if (now - updated_at).num_seconds() < 300 {
+            info!("Found most recently active series: {} (last activity: {})", series.title.as_deref().unwrap_or("Untitled"), updated_at);
             series
         } else {
-            info!("Most recent series activity is too old (timestamp: {}), clearing Discord status", timestamp);
+            info!("Most recent series activity is too old (timestamp: {}), clearing Discord status", updated_at);
             discord.clear_activity()?;
             return Ok(());
         }
     } else {
         // No position data found for any series, clear Discord status
-        info!("No position data found for any completed series, clearing Discord status");
+        info!("No position data found for any series, clearing Discord status");
         discord.clear_activity()?;
         return Ok(());
     };
