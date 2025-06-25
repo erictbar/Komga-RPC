@@ -277,42 +277,81 @@ async fn set_activity(
     timing_info: &mut TimingInfo,
     imgur_cache: &mut HashMap<String, String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    // Fetch in-progress books, sorted by most recently updated
-    let books_url = format!(
-        "{}/api/v1/books?readStatus=IN_PROGRESS&sort=lastModified,desc",
-        config.komga_url
-    );
-    let response = client
-        .get(&books_url)
-        .header("X-API-Key", &config.komga_api_key)
-        .send()
-        .await?;
+    // Optimized: fetch books in pages, filter for in-progress (readProgress.completed == false)
+    let mut page = 0;
+    let page_size = 100;
+    let mut most_recent_book: Option<serde_json::Value> = None;
+    let mut most_recent_time = None;
+    let mut found = false;
+    let now = Utc::now();
 
-    if !response.status().is_success() {
-        return Err(format!("Failed to fetch in-progress books with status: {}", response.status()).into());
+    loop {
+        let books_url = format!(
+            "{}/api/v1/books?page={}&pageSize={}&sort=lastModified,desc",
+            config.komga_url, page, page_size
+        );
+        let response = client
+            .get(&books_url)
+            .header("X-API-Key", &config.komga_api_key)
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            return Err(format!("Failed to fetch books with status: {}", response.status()).into());
+        }
+
+        let books_page: serde_json::Value = response.json().await?;
+        let books = books_page.get("content").and_then(|c| c.as_array()).cloned().unwrap_or_default();
+        if books.is_empty() {
+            break;
+        }
+
+        for book in &books {
+            let read_progress = book.get("readProgress");
+            if let Some(rp) = read_progress {
+                let completed = rp.get("completed").and_then(|v| v.as_bool()).unwrap_or(true);
+                if !completed {
+                    let last_modified_str = rp.get("lastModified").and_then(|v| v.as_str());
+                    let last_modified = last_modified_str.and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok()).map(|dt| dt.with_timezone(&Utc));
+                    if let Some(updated_at) = last_modified {
+                        if (now - updated_at).num_seconds() < 300 {
+                            // Found a recent in-progress book, use it immediately
+                            most_recent_book = Some(book.clone());
+                            most_recent_time = Some(updated_at);
+                            found = true;
+                            break;
+                        } else if most_recent_time.map_or(true, |t| updated_at > t) {
+                            // Track the most recent in-progress book, even if not within 5 minutes
+                            most_recent_book = Some(book.clone());
+                            most_recent_time = Some(updated_at);
+                        }
+                    }
+                }
+            }
+        }
+        if found {
+            break;
+        }
+        // Check if this is the last page
+        let last = books_page.get("last").and_then(|v| v.as_bool()).unwrap_or(false);
+        if last {
+            break;
+        }
+        page += 1;
     }
 
-    let books_page: serde_json::Value = response.json().await?;
-    let books = books_page.get("content").and_then(|c| c.as_array()).cloned().unwrap_or_default();
-
-    if books.is_empty() {
-        info!("No in-progress books found in Komga");
-        discord.clear_activity()?;
-        return Ok(());
-    }
-
-    // Use the most recently updated book (first in the sorted list)
-    let book = &books[0];
-    let book_id = book.get("id").and_then(|v| v.as_str()).unwrap_or("");
-    let book_title = book.get("title").and_then(|v| v.as_str());
-    let series_id = book.get("seriesId").and_then(|v| v.as_str()).unwrap_or("");
-    let library_id = book.get("libraryId").and_then(|v| v.as_str()).unwrap_or("");
-    let page = book.get("readProgress").and_then(|rp| rp.get("page")).and_then(|v| v.as_u64()).map(|v| v as u32);
-    let last_modified_str = book.get("readProgress").and_then(|rp| rp.get("lastModified")).and_then(|v| v.as_str());
-    let last_modified = last_modified_str.and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok()).map(|dt| dt.with_timezone(&Utc));
+    let book = match most_recent_book {
+        Some(b) => b,
+        None => {
+            info!("No in-progress books found in Komga");
+            discord.clear_activity()?;
+            return Ok(());
+        }
+    };
 
     // Only show as reading if updated in the last 5 minutes
-    let now = Utc::now();
+    let last_modified_str = book.get("readProgress").and_then(|rp| rp.get("lastModified")).and_then(|v| v.as_str());
+    let last_modified = last_modified_str.and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok()).map(|dt| dt.with_timezone(&Utc));
     if let Some(updated_at) = last_modified {
         if (now - updated_at).num_seconds() >= 300 {
             info!("Most recent in-progress book activity is too old (timestamp: {}), clearing Discord status", updated_at);
@@ -324,6 +363,12 @@ async fn set_activity(
         discord.clear_activity()?;
         return Ok(());
     }
+
+    let book_id = book.get("id").and_then(|v| v.as_str()).unwrap_or("");
+    let book_title = book.get("title").and_then(|v| v.as_str());
+    let series_id = book.get("seriesId").and_then(|v| v.as_str()).unwrap_or("");
+    let library_id = book.get("libraryId").and_then(|v| v.as_str()).unwrap_or("");
+    let page_num = book.get("readProgress").and_then(|rp| rp.get("page")).and_then(|v| v.as_u64()).map(|v| v as u32);
 
     // Fetch series info for the book
     let series_url = format!("{}/api/v1/series/{}", config.komga_url, series_id);
@@ -379,13 +424,15 @@ async fn set_activity(
         "Unknown Author".to_string()
     };
 
-    // Details: prefer book title, else series title
-    let mut details = if let Some(title) = book_title {
-        title.to_string()
-    } else {
-        series_title.to_string()
-    };
-    if let Some(page_num) = page {
+    // Details: prefer book.metadata.title, then book.title, then book.name, else series title
+    let mut details = book.get("metadata")
+        .and_then(|m| m.get("title"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .or_else(|| book.get("title").and_then(|v| v.as_str()).map(|s| s.to_string()))
+        .or_else(|| book.get("name").and_then(|v| v.as_str()).map(|s| s.to_string()))
+        .unwrap_or_else(|| series_title.to_string());
+    if let Some(page_num) = page_num {
         details = format!("{} (Page {})", details, page_num);
     }
 
