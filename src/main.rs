@@ -479,6 +479,17 @@ async fn set_activity(
         }
     }
 
+    // Exclude libraries by name if configured
+    if let Some(ref exclude_libraries) = config.exclude_libraries {
+        if let Some(ref lib_name) = library_name {
+            if exclude_libraries.iter().any(|ex| ex.eq_ignore_ascii_case(lib_name)) {
+                info!("Skipping excluded library: {}", lib_name);
+                discord.clear_activity()?;
+                return Ok(());
+            }
+        }
+    }
+
     // Authors: prefer book authors, then series authors, else library name
     let mut authors: Vec<String> = vec![];
     if let Some(book_authors) = book.get("metadata").and_then(|m| m.get("authors")).and_then(|a| a.as_array()) {
