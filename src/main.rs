@@ -424,34 +424,24 @@ async fn set_activity(
         "Unknown Author".to_string()
     };
 
-    // Details: prefer book.metadata.title, then book.title, then book.name, else series title
-    let mut details = book.get("metadata")
+    // Details: series title (first line)
+    let details = series_title.to_string();
+    // State: book title and page (second line)
+    let mut state = book.get("metadata")
         .and_then(|m| m.get("title"))
         .and_then(|v| v.as_str())
         .map(|s| s.to_string())
         .or_else(|| book.get("title").and_then(|v| v.as_str()).map(|s| s.to_string()))
         .or_else(|| book.get("name").and_then(|v| v.as_str()).map(|s| s.to_string()))
-        .unwrap_or_else(|| series_title.to_string());
+        .unwrap_or_else(|| "Untitled Book".to_string());
     if let Some(page_num) = page_num {
-        details = format!("{} (Page {})", details, page_num);
+        state = format!("{} (Page {})", state, page_num);
     }
-
-    if current_series.as_ref().map_or(true, |s| s.id != series.id) {
-        *current_series = Some(series.clone());
-        *playback_state = PlaybackState {
-            last_api_time: SystemTime::now(),
-            is_reading: false,
-        };
-    }
-    let large_text = if config.show_progress.unwrap_or(false) {
-        "Reading"
-    } else {
-        "Komga"
-    };
+    let large_text = "Komga-RPC";
 
     let activity_builder = activity::Activity::new()
         .details(&details)
-        .state(&author_text)
+        .state(&state)
         .activity_type(activity::ActivityType::Playing);
 
     let cover_url = get_komga_cover_path(client, config, &series.id, imgur_cache).await?;
