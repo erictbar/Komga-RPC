@@ -23,6 +23,7 @@ struct Config {
     use_imgur_cover: Option<bool>,
     imgur_client_id: Option<String>,
     exclude_libraries: Option<Vec<String>>,
+    exclude_tags: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -484,6 +485,43 @@ async fn set_activity(
         if let Some(ref lib_name) = library_name {
             if exclude_libraries.iter().any(|ex| ex.eq_ignore_ascii_case(lib_name)) {
                 info!("Skipping excluded library: {}", lib_name);
+                discord.clear_activity()?;
+                return Ok(());
+            }
+        }
+    }
+
+    // Exclude by tags if configured (series)
+    if let Some(ref exclude_tags) = config.exclude_tags {
+        // Fetch series info as JSON to check tags
+        let series_url = format!("{}/api/v1/series/{}", config.komga_url, series_id);
+        let response = client
+            .get(&series_url)
+            .header("X-API-Key", &config.komga_api_key)
+            .send()
+            .await?;
+        if response.status().is_success() {
+            let series_json: serde_json::Value = response.json().await?;
+            let series_tags = series_json.get("metadata")
+                .and_then(|m| m.get("tags"))
+                .and_then(|tags| tags.as_array());
+            if let Some(tags) = series_tags {
+                if tags.iter().filter_map(|t| t.as_str()).any(|tag| exclude_tags.iter().any(|ex| ex.eq_ignore_ascii_case(tag))) {
+                    info!("Skipping excluded series by tag");
+                    discord.clear_activity()?;
+                    return Ok(());
+                }
+            }
+        }
+    }
+    // Exclude by tags if configured (book)
+    if let Some(ref exclude_tags) = config.exclude_tags {
+        let book_tags = book.get("metadata")
+            .and_then(|m| m.get("tags"))
+            .and_then(|tags| tags.as_array());
+        if let Some(tags) = book_tags {
+            if tags.iter().filter_map(|t| t.as_str()).any(|tag| exclude_tags.iter().any(|ex| ex.eq_ignore_ascii_case(tag))) {
+                info!("Skipping excluded book by tag");
                 discord.clear_activity()?;
                 return Ok(());
             }
