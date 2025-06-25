@@ -545,6 +545,7 @@ async fn set_activity(
                 .and_then(|tags| tags.as_array());
             if let Some(tags) = series_tags {
                 if tags.iter().filter_map(|t| t.as_str()).any(|tag| nocover_tags.iter().any(|ex| ex.eq_ignore_ascii_case(tag))) {
+                    info!("Cover art excluded for series due to nocover_tags match");
                     skip_cover = true;
                 }
             }
@@ -555,6 +556,7 @@ async fn set_activity(
             .and_then(|tags| tags.as_array());
         if let Some(tags) = book_tags {
             if tags.iter().filter_map(|t| t.as_str()).any(|tag| nocover_tags.iter().any(|ex| ex.eq_ignore_ascii_case(tag))) {
+                info!("Cover art excluded for book due to nocover_tags match");
                 skip_cover = true;
             }
         }
