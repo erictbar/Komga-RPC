@@ -588,16 +588,32 @@ async fn set_activity(
 
     // Details: series title (first line)
     let details = series_title.clone();
-    // State: book title and page (second line)
-    let mut state = book.get("metadata")
-        .and_then(|m| m.get("title"))
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
-        .or_else(|| book.get("title").and_then(|v| v.as_str()).map(|s| s.to_string()))
-        .or_else(|| book.get("name").and_then(|v| v.as_str()).map(|s| s.to_string()))
-        .unwrap_or_else(|| "Untitled Book".to_string());
+    // State: book number and page (second line)
+    let mut book_number_str = String::new();
+    // Prefer metadata.number (string or number)
+    if let Some(meta) = book.get("metadata") {
+        if let Some(num_str) = meta.get("number").and_then(|v| v.as_str()) {
+            if !num_str.is_empty() {
+                book_number_str = format!("Book {}", num_str);
+            }
+        } else if let Some(num) = meta.get("number").and_then(|v| v.as_u64()) {
+            book_number_str = format!("Book {}", num);
+        } else if let Some(num) = book.get("number").and_then(|v| v.as_u64()) {
+            book_number_str = format!("Book {}", num);
+        }
+    } else if let Some(num) = book.get("number").and_then(|v| v.as_u64()) {
+        book_number_str = format!("Book {}", num);
+    }
+    let mut state = book_number_str;
     if let Some(page_num) = page_num {
-        state = format!("{} (Page {})", state, page_num);
+        if !state.is_empty() {
+            state = format!("{} (Page {})", state, page_num);
+        } else {
+            state = format!("Page {}", page_num);
+        }
+    }
+    if state.is_empty() {
+        state = "Komga-RPC".to_string();
     }
     let large_text = &details;
 
