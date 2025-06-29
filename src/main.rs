@@ -161,8 +161,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut current_series_title: Option<String> = None;
     let mut last_full_check = SystemTime::now();
     let mut last_page_update = SystemTime::now();
-    let full_check_interval = Duration::from_secs(20);
-    let page_update_interval = Duration::from_secs(5);
+    let full_check_interval = Duration::from_secs(40);
+    let page_update_interval = Duration::from_secs(10);
 
     loop {
         let now = SystemTime::now();
